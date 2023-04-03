@@ -6,7 +6,8 @@ import torch.nn.functional as F
 from dgl.nn.pytorch import GraphConv
 from itertools import chain, islice
 from time import time
-
+# from scipy.signal import window
+from collections import OrderedDict
 
 # GNN class to be instantiated with specified param values
 class GCN_dev(nn.Module):
@@ -50,6 +51,54 @@ class GCN_dev(nn.Module):
 
         return h
 
+
+# GNN class to be instantiated with specified param values
+class GCN_maxcut(nn.Module):
+    def __init__(self, in_feats, hidden_size, number_classes, dropout, device):
+        """
+        Initialize a new instance of the core GCN model of provided size.
+        Dropout is added in forward step.
+
+        Inputs:
+            in_feats: Dimension of the input (embedding) layer
+            hidden_size: Hidden layer size
+            dropout: Fraction of dropout to add between intermediate layer. Value is cached for later use.
+            device: Specifies device (CPU vs GPU) to load variables onto
+        """
+        super(GCN_maxcut, self).__init__()
+        all_layers = [in_feats] + hidden_size + [number_classes]
+        self.layer_sizes = list(window(all_layers))
+
+        self.out_layer_id = len(self.layer_sizes) - 1
+        self.dropout_frac = dropout
+        self.layers = OrderedDict()
+        for idx, (layer_in, layer_out) in enumerate(self.layer_sizes):
+            self.layers[idx] = GraphConv(layer_in, layer_out).to(device)
+
+    def forward(self, g, inputs):
+        """
+        Run forward propagation step of instantiated model.
+
+        Input:
+            self: GCN_dev instance
+            g: DGL graph object, i.e. problem definition
+            inputs: Input (embedding) layer weights, to be propagated through network
+        Output:
+            h: Output layer weights
+        """
+        for k, layer in self.layers.items():
+            if k == 0:
+                h = layer(g, inputs)
+                h = torch.relu(h)
+                h = F.dropout(h, p=self.dropout_frac)
+            elif 0 < k < self.out_layer_id:
+                h = layer(g, h)
+                h = torch.relu(h)
+                h = F.dropout(h, p=self.dropout_frac)
+            else:
+                h = layer(g, h)
+                h = torch.sigmoid(h)
+        return h
 
 # Generate random graph of specified size and type,
 # with specified degree (d) or edge probability (p)
@@ -238,3 +287,26 @@ def run_gnn_training(q_torch, dgl_graph, net, embed, optimizer, number_epochs, t
     final_bitstring = (probs.detach() >= prob_threshold) * 1
 
     return net, epoch, final_bitstring, best_bitstring
+
+
+def postprocess_gnn_maxcut(best_bitstring, nx_graph):
+    """
+    helper function to postprocess MIS results
+
+    Input:
+        best_bitstring: bitstring as torch tensor
+    Output:
+        size_mis: Size of MIS (int)
+        ind_set: MIS (list of integers)
+        number_violations: number of violations of ind.set condition
+    """
+
+    # get bitstring as list
+    bitstring_list = list(best_bitstring)
+
+    # compute cost
+    cuts = 0
+    
+    for (u, v) in nx_graph.edges:
+        cuts += 2 * best_bitstring[u]* best_bitstring[v] - best_bitstring[u] - best_bitstring[v]
+    return - cuts
